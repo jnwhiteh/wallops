@@ -187,7 +187,7 @@ func main() {
 
 	proxy, err := Connect(host, 6667, "", "bjornbot", "Bjornbot")
 	if err != nil {
-		log.Print(err)
+		log.Fatal(err)
 	}
 	proxy.Run()
 }
