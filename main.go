@@ -10,8 +10,8 @@ import (
 	"github.com/sorcix/irc"
 )
 
-const proxyTimeout = time.Minute * 10
-const missedDeadlineLimit = 1
+const proxyTimeout = time.Second * 90
+const missedDeadlineLimit = 4
 
 func Connect(host string, port uint, password, nick, realName string) (*Proxy, error) {
 	var proxy *Proxy
@@ -75,6 +75,12 @@ func Connect(host string, port uint, password, nick, realName string) (*Proxy, e
 			if err != nil {
 				return proxy, err
 			}
+		} else if msg.Command == irc.PING {
+			pong := &irc.Message{
+				Command: irc.PONG,
+				Params:  []string{fmt.Sprintf(":%s", msg.Trailing)},
+			}
+			send(encoder, pong)
 		}
 	}
 
