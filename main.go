@@ -129,6 +129,7 @@ func (p *Proxy) ReadMessages(ch chan<- *irc.Message, timeout chan<- struct{}) {
 			// Valid message, send to consumer
 			ch <- msg
 			p.ExtendReadDeadline()
+			skippedDeadlines = 0
 		} else {
 			// Is this a timeout error?
 			tcpError, ok := err.(net.Error)
@@ -147,6 +148,7 @@ func (p *Proxy) ReadMessages(ch chan<- *irc.Message, timeout chan<- struct{}) {
 			} else {
 				// Unexpected error
 				log.Printf("Unknown error while reading: %s", err)
+				return
 			}
 		}
 	}
