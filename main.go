@@ -10,14 +10,23 @@ import (
 	"github.com/sorcix/irc"
 )
 
-const proxyTimeout = time.Second * 90
-const missedDeadlineLimit = 4
+const proxyTimeout = time.Second * 30
+const pongTimeout = time.Second * 15
+const missedDeadlineLimit = 5
 
-func Connect(host string, port uint, password, nick, realName string) (*Proxy, error) {
+type ProxyConfig struct {
+	host     string
+	port     uint
+	password string
+	nick     string
+	realName string
+}
+
+func Connect(config ProxyConfig) (*Proxy, error) {
 	var proxy *Proxy
 
 	// Make a network connection
-	endpoint := fmt.Sprintf("%s:%d", host, port)
+	endpoint := fmt.Sprintf("%s:%d", config.host, config.port)
 	conn, err := net.Dial("tcp", endpoint)
 	if err != nil {
 		return proxy, err
@@ -33,8 +42,8 @@ func Connect(host string, port uint, password, nick, realName string) (*Proxy, e
 	writer := &writer{encoder}
 
 	// Send PASS (server password)
-	if password != "" {
-		msg := &irc.Message{Command: irc.PASS, Params: []string{password}}
+	if config.password != "" {
+		msg := &irc.Message{Command: irc.PASS, Params: []string{config.password}}
 		err = send(encoder, msg)
 		if err != nil {
 			return proxy, err
@@ -42,7 +51,7 @@ func Connect(host string, port uint, password, nick, realName string) (*Proxy, e
 	}
 
 	// Send NICK (nickname)
-	msg := &irc.Message{Command: irc.NICK, Params: []string{nick}}
+	msg := &irc.Message{Command: irc.NICK, Params: []string{config.nick}}
 	err = send(encoder, msg)
 	if err != nil {
 		return proxy, err
@@ -51,7 +60,7 @@ func Connect(host string, port uint, password, nick, realName string) (*Proxy, e
 	// Send USER (realName and hostmask)
 	msg = &irc.Message{
 		Command: irc.USER,
-		Params:  []string{nick, "host", "server", realName},
+		Params:  []string{config.nick, "host", "server", config.realName},
 	}
 	err = send(encoder, msg)
 	if err != nil {
@@ -59,7 +68,7 @@ func Connect(host string, port uint, password, nick, realName string) (*Proxy, e
 	}
 
 	// Wait for the welcome message and handle nickname in-use responses
-	currentNick := nick
+	currentNick := config.nick
 
 	for {
 		msg, err := safeDecode(decoder)
@@ -69,7 +78,7 @@ func Connect(host string, port uint, password, nick, realName string) (*Proxy, e
 		if msg.Command == irc.RPL_WELCOME {
 			break
 		} else if msg.Command == irc.ERR_NICKNAMEINUSE {
-			currentNick = randomNick(nick)
+			currentNick = randomNick(config.nick)
 			msg := &irc.Message{Command: irc.NICK, Params: []string{currentNick}}
 			err = send(encoder, msg)
 			if err != nil {
@@ -85,14 +94,29 @@ func Connect(host string, port uint, password, nick, realName string) (*Proxy, e
 	}
 
 	// Build a new proxy object
-	proxy = &Proxy{endpoint, nick, currentNick, conn, reader, writer}
+	proxy = &Proxy{config, endpoint, currentNick, conn, reader, writer}
 	return proxy, err
+}
+
+// Creates a new proxy object, "reconnects" and transfers everything to the
+// existing proxy object.
+func (p *Proxy) Reconnect() error {
+	newProxy, err := Connect(p.config)
+	if err != nil {
+		return err
+	}
+
+	p.conn = newProxy.conn
+	p.reader = newProxy.reader
+	p.writer = newProxy.writer
+	return nil
 }
 
 // Proxy contains the current state of the proxy server
 type Proxy struct {
+	config ProxyConfig // the configuration of the proxy server
+
 	addr        string // the address of the server the proxy is connected to
-	nickname    string // the desired nickname
 	currentNick string // the current nickname
 
 	conn   net.Conn // the underlying network connection
@@ -112,48 +136,87 @@ func (p *Proxy) Run() {
 	// certain number of times, we should initiate a PING to the server.
 
 	incoming := make(chan *irc.Message, 10)
-	timeout := make(chan struct{})
-	go p.ReadMessages(incoming, timeout)
+	failure := make(chan error)
+	go p.ReadMessages(incoming, failure)
 
 	for {
 		select {
 		case msg := <-incoming:
 			p.Process(msg)
-		case <-timeout:
-			log.Printf("Server appears to have timed out!")
+		case err := <-failure:
+			tcpError, ok := err.(net.Error)
+			if ok && tcpError.Timeout() {
+				log.Printf("Server appears to have timed out!")
+			} else {
+				log.Printf("Unknown error while reading: %s", err)
+			}
+			for i := uint(0); i < 300; i++ {
+				delay := getExponentialBackoffDelay(i)
+				log.Printf("%sWaiting for %v%s", colorWarning, delay, colorReset)
+				time.Sleep(delay)
+				log.Printf("Attempting to reconnect")
+				reconnectError := p.Reconnect()
+				if reconnectError != nil {
+					log.Printf("Failed to reconnect: %s", reconnectError)
+				}
+
+				go p.ReadMessages(incoming, failure)
+				break
+			}
 		}
 	}
 }
 
-func (p *Proxy) ReadMessages(ch chan<- *irc.Message, timeout chan<- struct{}) {
+func (p *Proxy) ReadMessages(ch chan<- *irc.Message, failure chan<- error) {
 	p.ExtendReadDeadline()
 
+	var waitingForPong string
 	skippedDeadlines := 0
 	for {
 		msg, err := p.reader.ReadMessage()
 		if err == nil {
 			// Valid message, send to consumer
 			ch <- msg
-			p.ExtendReadDeadline()
 			skippedDeadlines = 0
+
+			if msg.Command == irc.PONG && msg.Trailing == waitingForPong {
+				waitingForPong = ""
+			} else {
+				p.ExtendReadDeadline()
+			}
+
 		} else {
 			// Is this a timeout error?
 			tcpError, ok := err.(net.Error)
 			if ok && tcpError.Timeout() {
-				log.Printf("Timeout while reading: %s", err)
+				log.Printf("%s*** Missed read deadline (%d)%s", colorWarning,
+					skippedDeadlines, colorReset)
 				skippedDeadlines++
 
-				if skippedDeadlines >= missedDeadlineLimit {
-					// There's not much more we can do here
-					timeout <- struct{}{}
+				if waitingForPong != "" {
+					// We've timed out without a pong, trigger timeout
+					failure <- err
 					return
+
+				} else if skippedDeadlines >= missedDeadlineLimit {
+					// There's not much more we can do here
+					waitingForPong = fmt.Sprintf("%d", time.Now().Nanosecond())
+					ping := &irc.Message{
+						Command:  irc.PING,
+						Trailing: waitingForPong,
+					}
+					p.Send(ping)
+
+					// Prepare to wait for the pong
+					next := time.Now().Add(pongTimeout)
+					p.conn.SetReadDeadline(next)
 				} else {
 					// We have a few more deadlines to go
 					p.ExtendReadDeadline()
 				}
 			} else {
 				// Unexpected error
-				log.Printf("Unknown error while reading: %s", err)
+				failure <- err
 				return
 			}
 		}
@@ -183,9 +246,17 @@ func (p *Proxy) Process(msg *irc.Message) {
 
 func main() {
 	host := "irc.snoonet.org"
-	host = "localhost"
+	//	host = "localhost"
 
-	proxy, err := Connect(host, 6667, "", "bjornbot", "Bjornbot")
+	config := ProxyConfig{
+		host:     host,
+		port:     6667,
+		password: "",
+		nick:     "bjornbot",
+		realName: "Bjornbot",
+	}
+
+	proxy, err := Connect(config)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"time"
 
 	"github.com/mgutz/ansi"
 	"github.com/sorcix/irc"
@@ -13,6 +14,7 @@ const maxNickLength = 9
 
 var colorIncoming = ansi.ColorCode("green:black")
 var colorOutgoing = ansi.ColorCode("green+bh:black")
+var colorWarning = ansi.ColorCode("yellow:black")
 var colorReset = ansi.ColorCode("reset")
 
 // In case the IRC package has an issue parsing
@@ -45,6 +47,11 @@ func logRecv(msg *irc.Message) {
 func send(encoder *irc.Encoder, msg *irc.Message) error {
 	logSend(msg)
 	return encoder.Encode(msg)
+}
+
+func getExponentialBackoffDelay(attempt uint) time.Duration {
+	randomBit := time.Millisecond * time.Duration(rand.Int63n(1001))
+	return (time.Second * (1 << (attempt + 1))) + randomBit
 }
 
 // safeDecode fixes the semantics of the irc package to ensure we can properly

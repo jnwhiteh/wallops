@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
@@ -51,28 +52,53 @@ func (e timeoutError) Temporary() bool {
 	return true
 }
 
-// Four read timeouts should result in a message proxy.timeout
-func TestReadTimeout(t *testing.T) {
+// captureWriter captures messages that are written
+type captureWriter struct {
+	messages []maybeMessage
+}
+
+func (w *captureWriter) WriteMessage(msg *irc.Message) error {
+	w.messages = append(w.messages, maybeMessage{message: msg})
+	return nil
+}
+
+func (w *captureWriter) HasPingWaiting() bool {
+	if len(w.messages) != 1 {
+		return false
+	}
+	if w.messages[0].message == nil {
+		return false
+	}
+	return w.messages[0].message.Command == irc.PING
+}
+
+// Four read timeouts should result in a ping message being sent
+func TestReadTimeoutCausesPing(t *testing.T) {
 	log.SetOutput(ioutil.Discard)
 	timeoutMsg := maybeMessage{nil, timeoutError{}}
 
-	reader := &timeoutReader{
-		queue: []maybeMessage{},
-	}
+	reader := &timeoutReader{}
+	writer := &captureWriter{}
 
-	for i := 0; i < missedDeadlineLimit; i++ {
+	// all reads will timeout
+	for i := 0; i < missedDeadlineLimit+1; i++ {
 		reader.queue = append(reader.queue, timeoutMsg)
 	}
 
 	proxy := Proxy{
 		conn:   NewDummyConn(),
 		reader: reader,
+		writer: writer,
 	}
-	timeout := make(chan struct{}, 1)
-	proxy.ReadMessages(nil, timeout)
+	failure := make(chan error, 1)
+	proxy.ReadMessages(nil, failure)
 
 	select {
-	case <-timeout:
+	case <-failure:
+		// verify that a ping message was sent
+		if !writer.HasPingWaiting() {
+			t.Fatalf("Did not receive a ping message")
+		}
 	default:
 		t.Fail()
 	}
@@ -91,21 +117,54 @@ func TestDeadlineExtended(t *testing.T) {
 		},
 	}
 
-	for i := 0; i < missedDeadlineLimit; i++ {
+	for i := 0; i < missedDeadlineLimit+1; i++ {
 		reader.queue = append(reader.queue, timeoutMsg)
 	}
 
+	writer := &captureWriter{}
+	proxy := Proxy{
+		conn:   NewDummyConn(),
+		reader: reader,
+		writer: writer,
+	}
+
+	incoming := make(chan *irc.Message, 1)
+	failure := make(chan error, 1)
+	proxy.ReadMessages(incoming, failure)
+
+	select {
+	case <-failure:
+		// verify that a ping message was sent
+		if !writer.HasPingWaiting() {
+			t.Fatalf("Did not receive a ping message")
+		}
+	default:
+		t.Fail()
+	}
+}
+
+// Unexpected error results in message
+func TestUnexpectedError(t *testing.T) {
+	log.SetOutput(ioutil.Discard)
+	unexpectedError := maybeMessage{nil, fmt.Errorf("Unexpected")}
+
+	reader := &timeoutReader{
+		queue: []maybeMessage{unexpectedError},
+	}
 	proxy := Proxy{
 		conn:   NewDummyConn(),
 		reader: reader,
 	}
 
 	incoming := make(chan *irc.Message, 1)
-	timeout := make(chan struct{}, 1)
-	proxy.ReadMessages(incoming, timeout)
+	failure := make(chan error, 1)
+	proxy.ReadMessages(incoming, failure)
 
 	select {
-	case <-timeout:
+	case err := <-failure:
+		if unexpectedError.err != err {
+			t.Fatalf("Did not receive expected error")
+		}
 	default:
 		t.Fail()
 	}
