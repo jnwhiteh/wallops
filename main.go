@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -16,7 +17,7 @@ const missedDeadlineLimit = 5
 
 type ProxyConfig struct {
 	host     string
-	port     uint
+	port     int
 	password string
 	nick     string
 	realName string
@@ -244,13 +245,28 @@ func (p *Proxy) Process(msg *irc.Message) {
 	}
 }
 
+var (
+	help *bool   = flag.Bool("help", false, "Display usage information")
+	host *string = flag.String("host", "localhost", "The host to connect to")
+	port *int    = flag.Int("port", 6667, "The port to connect to")
+)
+
+func PrintUsage() {
+	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+	flag.PrintDefaults()
+}
+
 func main() {
-	host := "irc.snoonet.org"
-	//	host = "localhost"
+	// Parse commandline options
+	flag.Parse()
+	if *help {
+		PrintUsage()
+		return
+	}
 
 	config := ProxyConfig{
-		host:     host,
-		port:     6667,
+		host:     *host,
+		port:     *port,
 		password: "",
 		nick:     "bjornbot",
 		realName: "Bjornbot",
