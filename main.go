@@ -235,8 +235,8 @@ func (p *Proxy) SendFromConsole() {
 			msg := irc.ParseMessage(line)
 			if msg != nil {
 				log.Printf("%s::: %s%s", colorConsole, msg, colorReset)
+				p.Send(msg)
 			}
-			p.Send(msg)
 		}
 	}
 }
