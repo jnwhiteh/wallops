@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"time"
 
 	"github.com/sorcix/irc"
@@ -139,6 +140,7 @@ func (p *Proxy) Run() {
 	incoming := make(chan *irc.Message, 10)
 	failure := make(chan error)
 	go p.ReadMessages(incoming, failure)
+	go p.SendFromConsole()
 
 	for {
 		select {
@@ -220,6 +222,21 @@ func (p *Proxy) ReadMessages(ch chan<- *irc.Message, failure chan<- error) {
 				failure <- err
 				return
 			}
+		}
+	}
+}
+
+func (p *Proxy) SendFromConsole() {
+	// Connect a reader to os.Stdin and send those messages
+	console := bufio.NewReader(os.Stdin)
+	for {
+		line, err := console.ReadString('\n')
+		if err == nil {
+			msg := irc.ParseMessage(line)
+			if msg != nil {
+				log.Printf("%s::: %s%s", colorConsole, msg, colorReset)
+			}
+			p.Send(msg)
 		}
 	}
 }

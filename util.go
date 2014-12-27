@@ -16,6 +16,7 @@ var colorIncoming = ansi.ColorCode("green:black")
 var colorOutgoing = ansi.ColorCode("green+bh:black")
 var colorWarning = ansi.ColorCode("yellow:black")
 var colorReset = ansi.ColorCode("reset")
+var colorConsole = ansi.ColorCode("blue+bh:black")
 
 // In case the IRC package has an issue parsing
 var parseError = fmt.Errorf("Failed parsing IRC message")
