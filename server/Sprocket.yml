@@ -1,0 +1,10 @@
+wallops:
+    cmd:
+        - /usr/local/bin/go
+        - run
+        - main.go
+        - protocol.go
+        - util.go
+        - pool.go
+        - conn.go
+        - io.go
