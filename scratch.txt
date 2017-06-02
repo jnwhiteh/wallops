@@ -1,0 +1,138 @@
+func (p *Proxy) Send(command string, params []string, trailing string) error {
+	msg := &irc.Message{
+		Command:  command,
+		Params:   params,
+		Trailing: trailing,
+	}
+	log.Printf("-> %s", msg)
+	return p.encoder.Encode(msg)
+}
+
+func (p *Proxy) SendMessage(msg *irc.Message) error {
+	return p.encoder.Encode(msg)
+}
+
+func (p *Proxy) reader() {
+	for {
+		msg, err := p.decoder.Decode()
+		if err != nil {
+			// check to see if this is a TCP error (timeout)
+			tcpError, ok := err.(net.Error)
+			if ok && tcpError != nil && tcpError.Timeout() {
+				log.Printf("** Got a TCP timeout")
+			}
+
+			log.Print(err)
+			p.m.Lock()
+			for _, client := range p.clients {
+				close(client)
+			}
+			p.clients = nil
+			p.m.Unlock()
+			return
+		} else if msg == nil {
+			// message could not be decoded
+			log.Print("Invalid message received")
+		} else {
+			// extend the read/write deadline
+			p.conn.SetDeadline(time.Now().Add(ircTimeout))
+
+			// deliver the message to each client
+			p.m.RLock()
+			for _, client := range p.clients {
+				client <- msg
+			}
+			p.m.RUnlock()
+		}
+	}
+}
+
+func (p *Proxy) ReadMessages() <-chan *irc.Message {
+	// Register a new client with the proxy
+	client := make(chan *irc.Message)
+	p.m.Lock()
+	p.clients = append(p.clients, client)
+	p.m.Unlock()
+	return client
+}
+
+// ParseStdin reads IRC messages from standard input and sends them over the
+// proxy connection.
+func ParseStdin(proxy *Proxy) {
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		input := scanner.Text()
+		msg := irc.ParseMessage(input)
+		if msg != nil {
+			log.Printf("-> %s", msg)
+			proxy.SendMessage(msg)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Error reading stdin: %s", err)
+	}
+}
+
+func PingPong(proxy *Proxy) {
+	sleepDuration := time.Minute * 2
+	msgReceived := make(chan time.Time, 10)
+	pongChan := make(chan *irc.Message)
+	ticker := time.Tick(sleepDuration)
+
+	go func() {
+		var last time.Time
+		var waitingPong string
+		for {
+			select {
+			case newTime := <-msgReceived:
+				last = newTime
+			case <-ticker:
+				if waitingPong != "" {
+					// we're waiting for a pong, didn't get it in time
+					// this server is dead, need to kill it here
+					log.Printf("** Server seems to be disconnected")
+				}
+
+				if time.Now().Sub(last) > sleepDuration {
+					trailer := fmt.Sprintf("** bjornbot-%d", time.Now().Nanosecond())
+					ping := &irc.Message{Command: irc.PING, Trailing: trailer}
+					log.Printf("-> %s", ping)
+					proxy.SendMessage(ping)
+					waitingPong = trailer
+				}
+			case msg := <-pongChan:
+				if msg.Trailing == waitingPong {
+					log.Printf("** Got waiting pong message!")
+					waitingPong = ""
+					last = time.Now()
+				}
+
+			}
+		}
+	}()
+
+	for msg := range proxy.ReadMessages() {
+		msgReceived <- time.Now()
+
+		if msg.Command == irc.PONG {
+			pongChan <- msg
+		}
+
+		if msg.Command == irc.PING {
+			pong := &irc.Message{Command: irc.PONG, Params: []string{fmt.Sprintf(":%s", msg.Trailing)}}
+			log.Printf("-> %s", pong)
+			proxy.SendMessage(pong)
+		}
+	}
+}
+
+func exponentialBackoffDelay(attempt uint, max time.Duration) time.Duration {
+	randomBit := time.Millisecond * time.Duration(rand.Int63n(1001))
+	delay := (time.Second * (1 << (attempt + 1))) + randomBit
+	if delay < max {
+		return delay
+	}
+	return max
+}
+
+
